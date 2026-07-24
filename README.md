@@ -358,8 +358,8 @@ python -m app.backtest.cli \
   --initial-cash 1000000 \
   --symbols 600519.SH,300750.SZ,601318.SH
 
+export PYTHONPATH="$PWD/ashare_portfolio_backend"
 
-PYTHONPATH=ashare_portfolio_backend \
 python -m app.backtest.cli \
   --start 2026-01-01 \
   --end 2026-07-01 \
