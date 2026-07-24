@@ -132,6 +132,28 @@ class DecisionTaskRunner:
                 "LLM_MAX_TOKENS": str(self.settings.llm_max_tokens),
                 "LLM_TIMEOUT_SECONDS": str(self.settings.llm_timeout_seconds),
                 "LLM_MAX_RETRIES": str(self.settings.llm_max_retries),
+                "DECISION_ENGINE": self.settings.decision_engine_mode,
+                "MULTI_AGENT_SHORTLIST_SIZE": str(
+                    self.settings.multi_agent_shortlist_size
+                ),
+                "MULTI_AGENT_PARALLELISM": str(
+                    self.settings.multi_agent_parallelism
+                ),
+                "MULTI_AGENT_MAX_CALLS": str(
+                    self.settings.multi_agent_max_calls
+                ),
+                "MULTI_AGENT_SEMANTIC_RETRIES": str(
+                    self.settings.multi_agent_semantic_retries
+                ),
+                "MULTI_AGENT_TECHNICAL_WEIGHT": str(
+                    self.settings.multi_agent_technical_weight
+                ),
+                "MULTI_AGENT_FUNDAMENTAL_WEIGHT": str(
+                    self.settings.multi_agent_fundamental_weight
+                ),
+                "MULTI_AGENT_NEWS_WEIGHT": str(
+                    self.settings.multi_agent_news_weight
+                ),
                 "MIN_CASH_RATIO": str(self.settings.min_cash_ratio),
                 "MAX_POSITION_RATIO": str(self.settings.max_position_ratio),
                 "MAX_POSITIONS": str(self.settings.max_positions),

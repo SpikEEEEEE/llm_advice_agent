@@ -21,7 +21,7 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
 
     application = FastAPI(
         title="Independent A-share Portfolio Advisor",
-        version="0.2.0",
+        version="0.1.0",
         description=(
             "Manual portfolio ingestion and asynchronous AI-assisted decisions. "
             "The service returns advisory results and never submits broker orders."

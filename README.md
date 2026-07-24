@@ -27,6 +27,8 @@ Tushare 数据，调用 OpenAI-compatible LLM 生成目标仓位，再经过确�
 - 本地计算收益率、均线、波动率、RSI、成交量比例和 52 周位置；
 - OpenAI-compatible Chat Completions；
 - 优先使用 strict JSON Schema，不支持时显式降级到严格 `json_object`；
+- 可选的股票池原生多 Agent 决策图：全池横向研究、多空辩论、组合构建、三路风险审查；
+- 多 Agent 不按股票循环调用，而是共享同一个股票池状态并最终只输出一个组合权重向量；
 - 模型输出必须覆盖所有有效股票，并通过严格字段、数值和 action/target 语义校验；
 - A 股买入 100 股整手、T+1 可卖数量、现金、最低现金比例、单股仓位和最大持仓数限制；
 - 缺价时强制 `hold`，持仓估值不完整时冻结全部新买入；
@@ -40,8 +42,13 @@ Tushare 数据，调用 OpenAI-compatible LLM 生成目标仓位，再经过确�
 ashare_portfolio_backend/
 ├── app/
 │   ├── adapters/
-│   │   ├── openai_decision.py  # 直接调用 OpenAI-compatible API
+│   │   ├── openai_decision.py  # 原有的单次 LLM 决策引擎
+│   │   ├── portfolio_multi_agent.py # 多 Agent 的 LLM 适配与最终输出转换
+│   │   ├── decision_engine_factory.py # 按配置选择决策引擎
 │   │   └── tushare.py          # 直接调用 Tushare + 本地缓存
+│   ├── agents/
+│   │   ├── portfolio_graph.py  # 股票池研究、辩论、交易、风控状态图
+│   │   └── portfolio_schemas.py # 各节点严格结构化输出契约
 │   ├── api/                     # FastAPI 路由与认证
 │   ├── core/                    # 配置与 JSON 安全处理
 │   ├── domain/                  # 领域模型、特征和 A 股风控
@@ -79,6 +86,61 @@ LLM_MODEL=gpt-4o-mini
 
 也可以用 `LLM_API_KEY` 替代 `OPENAI_API_KEY`，并将 `LLM_BASE_URL` 指向兼容
 Chat Completions 的服务。
+
+默认仍使用原来的单次 LLM 引擎。启用股票池多 Agent 图：
+
+```dotenv
+DECISION_ENGINE=portfolio_multi_agent
+MULTI_AGENT_SHORTLIST_SIZE=8
+MULTI_AGENT_PARALLELISM=3
+MULTI_AGENT_MAX_CALLS=32
+MULTI_AGENT_SEMANTIC_RETRIES=1
+```
+
+`MULTI_AGENT_SHORTLIST_SIZE` 只限制进入深度辩论的非持仓候选；已有持仓一定进入
+shortlist，因此不会因为预筛选而失去减仓或清仓判断。三个分析权重可以通过
+`MULTI_AGENT_TECHNICAL_WEIGHT`、`MULTI_AGENT_FUNDAMENTAL_WEIGHT` 和
+`MULTI_AGENT_NEWS_WEIGHT` 调整。
+
+## 股票池多 Agent 决策图
+
+启用 `portfolio_multi_agent` 后，一次决策任务的状态流为：
+
+```text
+完整股票池快照
+  ├─ Technical Analyst ─┐
+  ├─ Fundamental Analyst ├─> 确定性加权排名 -> shortlist
+  └─ News Analyst ──────┘
+                                |
+                         Bull Researcher
+                                |
+                         Bear Researcher
+                                |
+                        Research Manager
+                                |
+                        Portfolio Trader
+                                |
+        ┌─ Aggressive Risk ─────┼─ Neutral Risk ─┐
+        └─ Conservative Risk ───┴────────────────┘
+                                |
+                       Portfolio Manager
+                                |
+                    全组合目标权重 + 现金权重
+                                |
+                       现有 A 股确定性风控
+```
+
+三个 Analyst 每次都看到完整有效股票池并做横向比较；后续角色共享前序结构化产物，
+而不是让每只股票各自形成互不知情的结论。Portfolio Manager 的输出必须覆盖全部
+shortlist，股票权重与现金权重之和必须为 100%，并满足最低现金、单股上限和最大
+持仓数。语义校验失败时会携带校验错误进行有限次数修复；总模型请求数还受
+`MULTI_AGENT_MAX_CALLS` 硬限制。
+
+正常路径基础调用数为 11 次：3 个 Analyst、Bull、Bear、Research Manager、
+Portfolio Trader、3 个 Risk Reviewer 和 Portfolio Manager。最终结果的
+`llm_meta.agent_artifacts` 会保留各阶段结构化结论，`agent_trace` 会保留调用和
+token usage，便于审计。它们是当前任务内的显式状态，不会自动读取上一次交易任务；
+跨任务记忆仍需另行设计绩效反馈或交易日志输入。
 
 ## 启动
 

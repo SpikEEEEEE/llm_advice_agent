@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -60,6 +61,14 @@ class Settings:
     buy_fee_buffer_ratio: Decimal
     market_close_hour: int
     market_close_minute: int
+    decision_engine_mode: str = "single_llm"
+    multi_agent_shortlist_size: int = 8
+    multi_agent_parallelism: int = 3
+    multi_agent_max_calls: int = 32
+    multi_agent_semantic_retries: int = 1
+    multi_agent_technical_weight: float = 0.35
+    multi_agent_fundamental_weight: float = 0.40
+    multi_agent_news_weight: float = 0.25
 
     def __post_init__(self) -> None:
         if self.app_env.lower() == "production" and not self.backend_api_key:
@@ -106,6 +115,35 @@ class Settings:
             raise ValueError("MARKET_CLOSE_HOUR must be between 0 and 23")
         if not 0 <= self.market_close_minute <= 59:
             raise ValueError("MARKET_CLOSE_MINUTE must be between 0 and 59")
+        if self.decision_engine_mode not in {
+            "single_llm",
+            "portfolio_multi_agent",
+        }:
+            raise ValueError(
+                "DECISION_ENGINE must be 'single_llm' or 'portfolio_multi_agent'"
+            )
+        if self.multi_agent_shortlist_size < 1:
+            raise ValueError("MULTI_AGENT_SHORTLIST_SIZE must be at least 1")
+        if not 1 <= self.multi_agent_parallelism <= 8:
+            raise ValueError("MULTI_AGENT_PARALLELISM must be between 1 and 8")
+        if self.multi_agent_max_calls < 1:
+            raise ValueError("MULTI_AGENT_MAX_CALLS must be at least 1")
+        if self.multi_agent_semantic_retries < 0:
+            raise ValueError("MULTI_AGENT_SEMANTIC_RETRIES cannot be negative")
+        analyst_weights = (
+            self.multi_agent_technical_weight,
+            self.multi_agent_fundamental_weight,
+            self.multi_agent_news_weight,
+        )
+        if any(
+            not math.isfinite(weight) or weight < 0
+            for weight in analyst_weights
+        ):
+            raise ValueError(
+                "MULTI_AGENT analyst weights must be finite and non-negative"
+            )
+        if sum(analyst_weights) <= 0:
+            raise ValueError("At least one MULTI_AGENT analyst weight must be positive")
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> "Settings":
@@ -193,6 +231,26 @@ class Settings:
             buy_fee_buffer_ratio=Decimal(env("BUY_FEE_BUFFER_RATIO", "0.001")),
             market_close_hour=int(env("MARKET_CLOSE_HOUR", "15")),
             market_close_minute=int(env("MARKET_CLOSE_MINUTE", "15")),
+            decision_engine_mode=env("DECISION_ENGINE", "single_llm")
+            .strip()
+            .lower(),
+            multi_agent_shortlist_size=int(
+                env("MULTI_AGENT_SHORTLIST_SIZE", "8")
+            ),
+            multi_agent_parallelism=int(env("MULTI_AGENT_PARALLELISM", "3")),
+            multi_agent_max_calls=int(env("MULTI_AGENT_MAX_CALLS", "32")),
+            multi_agent_semantic_retries=int(
+                env("MULTI_AGENT_SEMANTIC_RETRIES", "1")
+            ),
+            multi_agent_technical_weight=float(
+                env("MULTI_AGENT_TECHNICAL_WEIGHT", "0.35")
+            ),
+            multi_agent_fundamental_weight=float(
+                env("MULTI_AGENT_FUNDAMENTAL_WEIGHT", "0.40")
+            ),
+            multi_agent_news_weight=float(
+                env("MULTI_AGENT_NEWS_WEIGHT", "0.25")
+            ),
         )
 
     def load_universe(self) -> tuple[str, list[str]]:

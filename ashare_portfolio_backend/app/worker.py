@@ -7,7 +7,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from app.adapters.openai_decision import OpenAIDecisionEngine
+from app.adapters.decision_engine_factory import build_decision_engine
 from app.adapters.tushare import TushareMarketDataProvider
 from app.core.config import Settings
 from app.domain.risk import AShareRiskPolicy
@@ -34,7 +34,7 @@ def main() -> int:
     service = DecisionService(
         repository=repository,
         market_data=TushareMarketDataProvider(settings),
-        decision_engine=OpenAIDecisionEngine(settings),
+        decision_engine=build_decision_engine(settings),
         risk_policy=AShareRiskPolicy(settings),
     )
     # The parent normally enforces the hard deadline. This self-destruct timer

@@ -19,6 +19,12 @@ from .helpers import make_settings
         ("market_history_days", 29),
         ("max_positions", 0),
         ("max_as_of_skew_minutes", 0),
+        ("multi_agent_shortlist_size", 0),
+        ("multi_agent_parallelism", 9),
+        ("multi_agent_max_calls", 0),
+        ("multi_agent_semantic_retries", -1),
+        ("multi_agent_technical_weight", -0.1),
+        ("decision_engine_mode", "unknown"),
     ],
 )
 def test_risk_and_cache_settings_fail_fast(tmp_path, field, value):
@@ -33,3 +39,25 @@ def test_placeholder_secrets_are_not_treated_as_configured(tmp_path, monkeypatch
     assert has_configured_secret("BACKEND_API_KEY") is False
     with pytest.raises(ValueError, match="BACKEND_API_KEY"):
         Settings.from_env(tmp_path)
+
+
+def test_multi_agent_settings_are_loaded_from_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("DECISION_ENGINE", "portfolio_multi_agent")
+    monkeypatch.setenv("MULTI_AGENT_SHORTLIST_SIZE", "12")
+    monkeypatch.setenv("MULTI_AGENT_MAX_CALLS", "40")
+
+    settings = Settings.from_env(tmp_path)
+
+    assert settings.decision_engine_mode == "portfolio_multi_agent"
+    assert settings.multi_agent_shortlist_size == 12
+    assert settings.multi_agent_max_calls == 40
+
+
+def test_multi_agent_requires_at_least_one_positive_analyst_weight(tmp_path):
+    with pytest.raises(ValueError, match="At least one"):
+        replace(
+            make_settings(tmp_path),
+            multi_agent_technical_weight=0,
+            multi_agent_fundamental_weight=0,
+            multi_agent_news_weight=0,
+        )

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.adapters.openai_decision import OpenAIDecisionEngine
+from app.adapters.decision_engine_factory import build_decision_engine
 from app.adapters.tushare import TushareMarketDataProvider
 from app.core.config import Settings
 from app.domain.risk import AShareRiskPolicy
+from app.ports.decision_engine import DecisionEngine
 from app.repositories.sqlite import SQLiteRepository
 from app.services.decision_service import DecisionService
 from app.services.task_runner import DecisionTaskRunner
@@ -16,7 +17,7 @@ class AppContainer:
     settings: Settings
     repository: SQLiteRepository
     market_data: TushareMarketDataProvider
-    decision_engine: OpenAIDecisionEngine
+    decision_engine: DecisionEngine
     risk_policy: AShareRiskPolicy
     decision_service: DecisionService
     task_runner: DecisionTaskRunner
@@ -26,7 +27,7 @@ class AppContainer:
         effective_settings = settings or Settings.from_env()
         repository = SQLiteRepository(effective_settings.database_path)
         market_data = TushareMarketDataProvider(effective_settings)
-        decision_engine = OpenAIDecisionEngine(effective_settings)
+        decision_engine = build_decision_engine(effective_settings)
         risk_policy = AShareRiskPolicy(effective_settings)
         decision_service = DecisionService(
             repository,
