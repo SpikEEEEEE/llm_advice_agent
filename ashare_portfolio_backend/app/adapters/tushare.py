@@ -276,15 +276,23 @@ class TushareMarketDataProvider:
         self,
         symbol: str,
         data_date: date,
+        *,
+        history_start: date | None = None,
+        require_end_price: bool = True,
     ) -> tuple[pd.DataFrame, list[str]]:
-        start = data_date - timedelta(days=self.settings.market_history_days)
+        start = history_start or (
+            data_date - timedelta(days=self.settings.market_history_days)
+        )
         frame = self._client().daily(
             ts_code=symbol,
             start_date=start.strftime("%Y%m%d"),
             end_date=data_date.strftime("%Y%m%d"),
         )
         normalized, warnings = self._normalize_bars(frame)
-        if not self._has_fresh_price(normalized, data_date):
+        if normalized.empty or (
+            require_end_price
+            and not self._has_fresh_price(normalized, data_date)
+        ):
             raise StaleDataError(
                 f"Tushare did not return a valid close for {symbol} on {data_date}"
             )
@@ -313,6 +321,147 @@ class TushareMarketDataProvider:
         except Exception:
             warnings.append("ADJUSTMENT_FACTOR_UNAVAILABLE")
         return normalized, warnings
+
+    def sessions_between(self, start: date, end: date) -> tuple[date, ...]:
+        """Return open A-share sessions in an inclusive historical range."""
+
+        if end < start:
+            raise ValueError("Historical session range end precedes start")
+        if self._online_allowed():
+            try:
+                frame = self._client().trade_cal(
+                    exchange="",
+                    start_date=start.strftime("%Y%m%d"),
+                    end_date=end.strftime("%Y%m%d"),
+                    fields="cal_date,is_open",
+                )
+                if not isinstance(frame, pd.DataFrame) or frame.empty:
+                    raise DataUnavailableError(
+                        "Tushare returned no historical calendar rows"
+                    )
+                normalized: list[date] = []
+                for _, row in frame.iterrows():
+                    parsed = pd.to_datetime(
+                        str(row.get("cal_date") or ""),
+                        format="%Y%m%d",
+                        errors="coerce",
+                    )
+                    if pd.isna(parsed):
+                        continue
+                    session = parsed.date()
+                    is_open = bool(int(row.get("is_open") or 0))
+                    self.cache.write_json(
+                        "calendar",
+                        session.isoformat(),
+                        is_open,
+                    )
+                    if is_open:
+                        normalized.append(session)
+                sessions = tuple(sorted(set(normalized)))
+                if sessions:
+                    return sessions
+            except DataUnavailableError:
+                raise
+            except Exception as exc:
+                raise DataUnavailableError(
+                    f"Tushare historical calendar failed: {exc}"
+                ) from exc
+
+        sessions: list[date] = []
+        candidate = start
+        while candidate <= end:
+            if self._is_trading_day(candidate):
+                sessions.append(candidate)
+            candidate += timedelta(days=1)
+        if not sessions:
+            raise DataUnavailableError(
+                "No cached A-share sessions were available in the range"
+            )
+        return tuple(sessions)
+
+    def load_history(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        """Load normalized raw bars and adjustment factors for backtesting."""
+
+        if end < start:
+            raise ValueError("Historical price range end precedes start")
+        cached_raw = self.cache.read_bars(symbol)
+        cached, cached_warnings = (
+            self._normalize_bars(cached_raw)
+            if cached_raw is not None
+            else (pd.DataFrame(), [])
+        )
+        eligible = (
+            cached[
+                (cached["date"] >= start)
+                & (cached["date"] <= end)
+            ].copy()
+            if not cached.empty
+            else cached
+        )
+        has_end = self._has_fresh_price(
+            cached[cached["date"] <= end].copy()
+            if not cached.empty
+            else cached,
+            end,
+        )
+        has_start_coverage = (
+            not eligible.empty
+            and eligible.iloc[0]["date"] <= start + timedelta(days=10)
+        )
+        if has_end and has_start_coverage:
+            return eligible.reset_index(drop=True)
+        if not self._online_allowed():
+            if not eligible.empty:
+                return eligible.reset_index(drop=True)
+            raise DataUnavailableError(
+                f"No complete cached history for {symbol} from {start} to {end}"
+            )
+
+        try:
+            fetched, fetch_warnings = self._fetch_bars(
+                symbol,
+                end,
+                history_start=start,
+                require_end_price=False,
+            )
+            merged = pd.concat([cached, fetched], ignore_index=True)
+            merged = (
+                merged.drop_duplicates(subset=["date"], keep="last")
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+            warnings = list(
+                dict.fromkeys([*cached_warnings, *fetch_warnings])
+            )
+            self.cache.write_bars(symbol, merged)
+            self.cache.write_json(
+                "bar_quality",
+                _safe_symbol(symbol),
+                {
+                    "warnings": warnings,
+                    "retrieved_for": end.isoformat(),
+                },
+            )
+            eligible = merged[
+                (merged["date"] >= start)
+                & (merged["date"] <= end)
+            ].copy()
+            if eligible.empty:
+                raise StaleDataError(
+                    f"No historical prices for {symbol} in the requested range"
+                )
+            return eligible.reset_index(drop=True)
+        except (DataUnavailableError, StaleDataError):
+            raise
+        except Exception as exc:
+            raise DataUnavailableError(
+                f"Historical price data failed for {symbol}: {exc}"
+            ) from exc
 
     @staticmethod
     def _with_point_in_time_adjustment(

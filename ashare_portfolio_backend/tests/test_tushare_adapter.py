@@ -226,3 +226,24 @@ def test_historical_date_uses_eligible_rows_from_a_newer_cache(tmp_path):
     assert future_date not in set(bars["date"])
     assert bars.iloc[-1]["adjusted_close"] == 10.0
     assert warnings == []
+
+
+def test_backtest_history_and_calendar_are_loaded_in_bounded_ranges(tmp_path):
+    client = FakePro()
+    provider = TushareMarketDataProvider(
+        _online_settings(tmp_path),
+        client=client,
+    )
+    history_start = DATA_DATE - timedelta(days=39)
+
+    sessions = provider.sessions_between(DATA_DATE, DATA_DATE)
+    history = provider.load_history(
+        "600519.SH",
+        history_start,
+        DATA_DATE,
+    )
+
+    assert sessions == (DATA_DATE,)
+    assert history.iloc[0]["date"] == history_start
+    assert history.iloc[-1]["date"] == DATA_DATE
+    assert history.iloc[-1]["adj_factor"] == 2.0

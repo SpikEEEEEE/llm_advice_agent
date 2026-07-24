@@ -142,6 +142,70 @@ Portfolio Trader、3 个 Risk Reviewer 和 Portfolio Manager。最终结果的
 token usage，便于审计。它们是当前任务内的显式状态，不会自动读取上一次交易任务；
 跨任务记忆仍需另行设计绩效反馈或交易日志输入。
 
+## 历史回测
+
+回测是独立 CLI，不开放历史 HTTP 接口，也不会写入生产 Portfolio 或 Decision Run。
+它复用相同的决策引擎、股票池输入和 `AShareRiskPolicy`，在历史收盘后生成建议，并
+在下一交易日开盘执行模拟成交：
+
+```bash
+PYTHONPATH=ashare_portfolio_backend \
+.venv/bin/python -m app.backtest.cli \
+  --start 2025-01-01 \
+  --end 2025-12-31 \
+  --engine portfolio_multi_agent \
+  --rebalance monthly \
+  --max-decisions 24 \
+  --initial-cash 1000000
+```
+
+也可以只测试部分股票：
+
+```text
+--symbols 600519.SH,300750.SZ,601318.SH
+```
+
+默认行为：
+
+- 首个交易日收盘生成初始组合，第二个交易日开盘成交；
+- 随后在每月最后一个交易日收盘调仓；
+- 买卖滑点均为 5 bps；
+- 佣金按成交金额 0.03%、单笔最低 5 元模拟，这只是可修改的券商费用假设；
+- 卖出印花税在 2023-08-28 前按 0.1%、此后按 0.05%模拟；
+- 默认不使用同一开盘卖出所得继续买入，与在线确定性风控的保守现金语义一致；
+- 使用复权因子构造以回测起点归一化的总回报价格，避免分红除权造成虚假亏损；
+- 相同模型、数据、组合和配置的历史决策会保存到
+  `data/cache/backtest_decisions/`，重复运行不会再次消耗 LLM 调用。
+- 默认最多允许 24 个决策时点；更长或更高频的回测必须显式提高
+  `--max-decisions`，防止意外产生大量模型费用。
+
+印花税切换日期依据财政部、税务总局自 2023-08-28 起减半征收的
+[官方公告](https://shanxi.chinatax.gov.cn/web/detail/sx-11400-545-1780448)；
+复权价格使用 Tushare 的
+[复权因子](https://tushare.pro/document/2?doc_id=28)。
+
+默认结果目录为 `data/backtests/<run_id>/`：
+
+```text
+summary.json       # 收益、年化波动、Sharpe、最大回撤、换手和费用
+equity_curve.csv   # 每个交易日的净值、现金和持仓市值
+trades.csv         # 决策日、成交日、成交价、股数、滑点和费用
+decisions.json     # 每次原始 Agent 元数据、风控结果和数据告警
+```
+
+完整 20 股股票池做一年月频多 Agent 回测，正常路径大约产生 12 次决策、
+132 次模型调用；建议先用 2–3 只股票和 2–3 个月验证凭据、Tushare 权限和成本。
+
+必须正确理解以下偏差：
+
+- `config/universe.yaml` 是当前固定股票池，回测过去会有幸存者偏差和选股偏差；
+- 新闻、财务指标必须在历史 `as_of` 前可见；取不到时会触发现有数据质量风控，
+  可能导致不交易；
+- 当前未模拟涨跌停排队、停牌后的可成交性、成交量冲击、退市和现金分红明细；
+- 总回报复权价格是绩效代理，不是逐笔券商对账单；
+- LLM 即使温度为零也不保证所有供应商长期完全确定，因此应保留 decision cache、
+  模型名和 `decisions.json`。
+
 ## 启动
 
 ```bash
@@ -269,6 +333,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider
 - 交易日历、收盘时点、本地缓存和历史 point-in-time 读取；
 - Tushare 行情单位、复权因子、基本面公告日期和新闻 cutoff；
 - 特征上下文、strict JSON Schema、兼容降级和非法模型输出拒绝；
+- 历史收盘决策、下一交易日开盘成交、交易费用、净值和调仓计划；
 - 从隔离工作目录导入应用，以及依赖元数据独立性。
 
 ## 运行限制与安全
@@ -280,3 +345,25 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider
 - 正式环境需要 HTTPS、用户认证、数据库加密、日志脱敏、访问审计和密钥管理；
 - 不要把 `.env`、Tushare Token、LLM Key、完整 Prompt 或持仓数据提交到 Git；
 - 结果是研究建议，不构成自动成交指令。
+
+
+
+PYTHONPATH=ashare_portfolio_backend \
+python -m app.backtest.cli \
+  --start 2025-01-01 \
+  --end 2025-03-31 \
+  --engine portfolio_multi_agent \
+  --rebalance monthly \
+  --max-decisions 6 \
+  --initial-cash 1000000 \
+  --symbols 600519.SH,300750.SZ,601318.SH
+
+
+PYTHONPATH=ashare_portfolio_backend \
+python -m app.backtest.cli \
+  --start 2026-01-01 \
+  --end 2026-07-01 \
+  --engine portfolio_multi_agent \
+  --rebalance monthly \
+  --max-decisions 24 \
+  --initial-cash 1000000
