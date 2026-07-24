@@ -113,3 +113,60 @@ def test_non_finite_llm_payload_is_persisted_as_strict_json(tmp_path):
     assert decision["raw_decision"]["tech_score"] is None
     assert completed["result"]["llm_meta"]["latency_ms"] is None
     json.dumps(completed["result"], allow_nan=False)
+
+
+def test_decision_engine_failure_is_sanitized_and_marked_failed_quality(
+    tmp_path,
+):
+    settings = make_settings(tmp_path)
+    repository = SQLiteRepository(settings.database_path)
+    repository.initialize()
+    portfolio = repository.create_portfolio(
+        {
+            "name": "test",
+            "cash": "10000",
+            "positions": [
+                {
+                    "symbol": "600519.SH",
+                    "shares": 100,
+                    "available_shares": 100,
+                    "average_cost": "9",
+                }
+            ],
+        }
+    )
+    secret = "TOP_SECRET_PROVIDER_RESPONSE"
+
+    class FailingEngine:
+        def decide(self, _decision_input, on_stage=None):
+            del on_stage
+            raise RuntimeError(secret)
+
+    service = DecisionService(
+        repository,
+        FakeMarketData(),
+        FailingEngine(),  # type: ignore[arg-type]
+        AShareRiskPolicy(settings),
+    )
+    run, _ = repository.create_decision_run(
+        portfolio=portfolio,
+        mode="holdings_only",
+        as_of=datetime.now(tz=ZoneInfo("Asia/Shanghai")).isoformat(),
+        universe_version="test_v1",
+        universe=[],
+        idempotency_key=None,
+        request_fingerprint="failed-engine-test",
+    )
+
+    service.run(run["id"])
+
+    completed = repository.get_decision_run(run["id"])
+    assert completed is not None
+    persisted = json.dumps(completed, ensure_ascii=False)
+    assert completed["status"] == "degraded"
+    assert completed["result"]["decision_quality"] == "failed"
+    assert (
+        completed["result"]["llm_meta"]["engine"]
+        == "failed_safe_hold"
+    )
+    assert secret not in persisted

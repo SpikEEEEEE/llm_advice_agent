@@ -22,9 +22,16 @@ from .helpers import make_settings
         ("multi_agent_shortlist_size", 0),
         ("multi_agent_parallelism", 9),
         ("multi_agent_max_calls", 0),
+        ("multi_agent_output_retries", -1),
+        ("multi_agent_output_retries", 6),
         ("multi_agent_semantic_retries", -1),
+        ("multi_agent_min_analysts", 1),
+        ("multi_agent_min_analysts", 4),
+        ("multi_agent_min_risk_reviews", 1),
+        ("multi_agent_min_risk_reviews", 4),
         ("multi_agent_technical_weight", -0.1),
         ("decision_engine_mode", "unknown"),
+        ("llm_structured_output_mode", "yaml"),
     ],
 )
 def test_risk_and_cache_settings_fail_fast(tmp_path, field, value):
@@ -45,12 +52,20 @@ def test_multi_agent_settings_are_loaded_from_environment(tmp_path, monkeypatch)
     monkeypatch.setenv("DECISION_ENGINE", "portfolio_multi_agent")
     monkeypatch.setenv("MULTI_AGENT_SHORTLIST_SIZE", "12")
     monkeypatch.setenv("MULTI_AGENT_MAX_CALLS", "40")
+    monkeypatch.setenv("MULTI_AGENT_OUTPUT_RETRIES", "2")
+    monkeypatch.setenv("MULTI_AGENT_MIN_ANALYSTS", "3")
+    monkeypatch.setenv("MULTI_AGENT_MIN_RISK_REVIEWS", "2")
+    monkeypatch.setenv("LLM_STRUCTURED_OUTPUT_MODE", "json_object")
 
     settings = Settings.from_env(tmp_path)
 
     assert settings.decision_engine_mode == "portfolio_multi_agent"
     assert settings.multi_agent_shortlist_size == 12
     assert settings.multi_agent_max_calls == 40
+    assert settings.multi_agent_output_retries == 2
+    assert settings.multi_agent_min_analysts == 3
+    assert settings.multi_agent_min_risk_reviews == 2
+    assert settings.llm_structured_output_mode == "json_object"
 
 
 def test_multi_agent_requires_at_least_one_positive_analyst_weight(tmp_path):

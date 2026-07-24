@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -175,6 +176,20 @@ def test_json_schema_unsupported_falls_back_to_strict_json_object(tmp_path):
     assert bundle.warnings == (
         "LLM_JSON_SCHEMA_UNSUPPORTED_USED_JSON_OBJECT",
     )
+
+
+def test_no_market_context_is_an_explicit_failed_safe_hold(tmp_path):
+    client = FakeClient([])
+    bundle = OpenAIDecisionEngine(
+        make_settings(tmp_path),
+        client=client,
+    ).decide(replace(_input(), market={}))
+
+    assert bundle.decisions == {}
+    assert bundle.meta["engine"] == "failed_safe_hold"
+    assert bundle.meta["decision_quality"] == "failed"
+    assert bundle.meta["calls"] == 0
+    assert client.completions.requests == []
 
 
 @pytest.mark.parametrize(

@@ -110,8 +110,8 @@ class TushareHistoricalDataFeed:
                     raw,
                     sessions[0],
                 )
-            except Exception as exc:
-                failures[symbol] = str(exc)
+            except Exception:
+                failures[symbol] = "DATA_LOAD_FAILED"
         if not histories:
             raise DataUnavailableError(
                 f"No symbol history could be loaded: {failures}"

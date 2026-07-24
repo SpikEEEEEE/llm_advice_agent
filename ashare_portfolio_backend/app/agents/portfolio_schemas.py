@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 AgentPoint = Annotated[str, Field(min_length=1, max_length=500)]
+CompactSignal = Annotated[str, Field(min_length=1, max_length=180)]
+RiskFlag = Annotated[str, Field(min_length=1, max_length=48)]
 
 
 class StrictAgentModel(BaseModel):
@@ -29,13 +31,13 @@ class SymbolAssessment(StrictAgentModel):
         "negative",
         "strong_negative",
     ]
-    evidence: list[AgentPoint] = Field(min_length=1, max_length=4)
-    risks: list[AgentPoint] = Field(max_length=4)
+    key_signal: CompactSignal
+    risk_flags: list[RiskFlag] = Field(max_length=3)
 
 
 class PoolAnalystReport(StrictAgentModel):
     assessments: list[SymbolAssessment] = Field(min_length=1)
-    summary: str = Field(min_length=1, max_length=3000)
+    summary: str = Field(min_length=1, max_length=800)
 
 
 class DebateSymbolView(StrictAgentModel):

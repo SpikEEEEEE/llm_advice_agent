@@ -18,7 +18,7 @@ from app.domain.models import (
 from app.domain.risk import AShareRiskPolicy
 from app.ports.decision_engine import DecisionEngine
 
-from .cache import BacktestDecisionCache
+from .cache import BacktestDecisionCache, decision_quality
 from .data import HistoricalDataFeed
 from .models import (
     BacktestConfig,
@@ -32,6 +32,96 @@ from .models import (
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 ONE_HUNDRED = Decimal("100")
 TEN_THOUSAND = Decimal("10000")
+SAFE_EXCEPTION_TYPES = {
+    "RuntimeError",
+    "ValueError",
+    "TypeError",
+    "KeyError",
+    "TimeoutError",
+    "ConnectionError",
+    "DataUnavailableError",
+    "StaleDataError",
+    "ProviderConfigurationError",
+    "PortfolioAgentGraphError",
+    "PortfolioAgentOutputError",
+    "DecisionOutputError",
+}
+
+
+def _safe_exception_type(exc: Exception) -> str:
+    name = type(exc).__name__
+    return name if name in SAFE_EXCEPTION_TYPES else "Exception"
+
+
+def _non_negative_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int) and value >= 0:
+        return value
+    return default
+
+
+def _analysis_coverage(meta: dict[str, Any], quality: str) -> float:
+    raw = meta.get("analysis_coverage")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        numeric = float(raw)
+        if math.isfinite(numeric):
+            return max(0.0, min(1.0, numeric))
+    return 0.0 if quality == "failed" else 1.0
+
+
+def _validated_outputs(meta: dict[str, Any]) -> int:
+    explicit = meta.get("validated_outputs")
+    if explicit is None:
+        explicit = meta.get("provider_successes")
+    if explicit is not None:
+        return _non_negative_int(explicit)
+    trace = meta.get("agent_trace")
+    if not isinstance(trace, list):
+        trace = meta.get("trace")
+    return len(trace) if isinstance(trace, list) else 0
+
+
+def _bundle_audit(bundle: RawDecisionBundle) -> dict[str, Any]:
+    meta = bundle.meta
+    quality = decision_quality(bundle)
+    raw_stage_health = meta.get("stage_health")
+    stage_health = (
+        raw_stage_health if isinstance(raw_stage_health, dict) else {}
+    )
+    fresh_calls = _non_negative_int(meta.get("calls"))
+    fresh_attempts = _non_negative_int(
+        meta.get("provider_attempts"),
+        fresh_calls,
+    )
+    cached_original_calls = _non_negative_int(
+        meta.get("cached_original_calls")
+    )
+    cached_original_attempts = _non_negative_int(
+        meta.get("cached_original_provider_attempts"),
+        cached_original_calls,
+    )
+    return {
+        "decision_quality": quality,
+        "analysis_coverage": _analysis_coverage(meta, quality),
+        "stage_health": stage_health,
+        "fresh_provider_calls": fresh_calls,
+        "provider_attempts": fresh_attempts,
+        "cached_original_calls": cached_original_calls,
+        "cached_original_provider_attempts": (
+            cached_original_attempts
+        ),
+        "validated_outputs": _validated_outputs(meta),
+        "cached_original_validated_outputs": _non_negative_int(
+            meta.get("cached_original_validated_outputs")
+        ),
+        "output_repair_attempts": _non_negative_int(
+            meta.get("output_repair_attempts")
+        ),
+        "cached_original_output_repair_attempts": _non_negative_int(
+            meta.get("cached_original_output_repair_attempts")
+        ),
+    }
 
 
 @dataclass
@@ -146,7 +236,9 @@ class PortfolioBacktester:
                     as_of,
                 )
             except Exception as exc:
-                unavailable[symbol] = str(exc)
+                unavailable[symbol] = (
+                    f"{_safe_exception_type(exc)}: market snapshot unavailable"
+                )
         return DecisionInput(
             run_id=run_id,
             portfolio=self._portfolio(account, data_date),
@@ -559,11 +651,68 @@ class PortfolioBacktester:
             for trade in trades
         )
         average_equity = sum(equities) / len(equities)
-        llm_calls = sum(
-            int(item.get("llm_calls", 0) or 0)
+        fresh_provider_calls = sum(
+            _non_negative_int(item.get("fresh_provider_calls"))
+            for item in decisions
+        )
+        provider_attempts = sum(
+            _non_negative_int(item.get("provider_attempts"))
+            for item in decisions
+        )
+        cached_original_calls = sum(
+            _non_negative_int(item.get("cached_original_calls"))
+            for item in decisions
+        )
+        cached_original_provider_attempts = sum(
+            _non_negative_int(
+                item.get("cached_original_provider_attempts")
+            )
+            for item in decisions
+        )
+        validated_outputs = sum(
+            _non_negative_int(item.get("validated_outputs"))
+            for item in decisions
+        )
+        cached_original_validated_outputs = sum(
+            _non_negative_int(
+                item.get("cached_original_validated_outputs")
+            )
+            for item in decisions
+        )
+        output_repair_attempts = sum(
+            _non_negative_int(item.get("output_repair_attempts"))
+            for item in decisions
+        )
+        cached_original_output_repair_attempts = sum(
+            _non_negative_int(
+                item.get("cached_original_output_repair_attempts")
+            )
             for item in decisions
         )
         cache_hits = sum(bool(item.get("cache_hit")) for item in decisions)
+        decision_count = len(decisions)
+        quality_counts = {
+            quality: sum(
+                item.get("decision_quality") == quality
+                for item in decisions
+            )
+            for quality in ("healthy", "degraded", "failed")
+        }
+        quality_rates = {
+            quality: (
+                count / decision_count if decision_count else None
+            )
+            for quality, count in quality_counts.items()
+        }
+        result_quality_status = (
+            "not_evaluated"
+            if not decisions
+            else (
+                "valid"
+                if quality_counts["healthy"] == decision_count
+                else "invalid"
+            )
+        )
         return {
             "initial_cash": initial,
             "final_equity": final_equity,
@@ -584,8 +733,34 @@ class PortfolioBacktester:
                 if average_equity > 0
                 else None
             ),
-            "decision_count": len(decisions),
-            "llm_provider_calls": llm_calls,
+            "decision_count": decision_count,
+            "healthy_decision_count": quality_counts["healthy"],
+            "degraded_decision_count": quality_counts["degraded"],
+            "failed_decision_count": quality_counts["failed"],
+            "healthy_decision_rate": quality_rates["healthy"],
+            "degraded_decision_rate": quality_rates["degraded"],
+            "failed_decision_rate": quality_rates["failed"],
+            "result_quality_status": result_quality_status,
+            # Backward-compatible name: calls are fresh provider attempts in
+            # the current run, never attempts replayed from a cache entry.
+            "llm_provider_calls": fresh_provider_calls,
+            "llm_fresh_provider_calls": fresh_provider_calls,
+            "llm_cached_original_calls": cached_original_calls,
+            "llm_provider_attempts": provider_attempts,
+            "llm_cached_original_provider_attempts": (
+                cached_original_provider_attempts
+            ),
+            "llm_provider_attempts_represented_total": (
+                provider_attempts + cached_original_provider_attempts
+            ),
+            "llm_validated_outputs": validated_outputs,
+            "llm_cached_original_validated_outputs": (
+                cached_original_validated_outputs
+            ),
+            "llm_output_repair_attempts": output_repair_attempts,
+            "llm_cached_original_output_repair_attempts": (
+                cached_original_output_repair_attempts
+            ),
             "decision_cache_hits": cache_hits,
             "equal_weight_universe_return": finite_metric(
                 benchmark_return
@@ -704,10 +879,19 @@ class PortfolioBacktester:
             except Exception as exc:
                 bundle = RawDecisionBundle(
                     decisions={},
-                    meta={"calls": 0, "engine": "failed_safe_hold"},
+                    meta={
+                        "calls": 0,
+                        "provider_attempts": 0,
+                        "engine": "failed_safe_hold",
+                        "decision_quality": "failed",
+                        "analysis_coverage": 0.0,
+                        "stage_health": {
+                            "decision_engine": "failed",
+                        },
+                    },
                     warnings=(
-                        "Decision engine failed; safe hold used: "
-                        f"{type(exc).__name__}: {exc}",
+                        "Decision engine failed; safe hold used "
+                        f"({_safe_exception_type(exc)})",
                     ),
                 )
             risk_result = self.risk_policy.apply(
@@ -715,8 +899,7 @@ class PortfolioBacktester:
                 bundle,
             )
             pending[execution_session] = (session, risk_result)
-            raw_calls = bundle.meta.get("calls", 0)
-            llm_calls = raw_calls if isinstance(raw_calls, int) else 0
+            audit = _bundle_audit(bundle)
             decision_warnings = [
                 str(item)
                 for item in risk_result.get("warnings", [])
@@ -729,7 +912,8 @@ class PortfolioBacktester:
                     "decision_session": session.isoformat(),
                     "execution_session": execution_session.isoformat(),
                     "cache_hit": cache_hit,
-                    "llm_calls": llm_calls,
+                    "llm_calls": audit["fresh_provider_calls"],
+                    **audit,
                     "unavailable_symbols": (
                         decision_input.unavailable_symbols
                     ),
@@ -742,6 +926,7 @@ class PortfolioBacktester:
                             for symbol, holding in account.holdings.items()
                         },
                     },
+                    "llm_meta": bundle.meta,
                     "risk_result": risk_result,
                 }
             )
@@ -767,6 +952,23 @@ class PortfolioBacktester:
             benchmark_return=benchmark_return,
             benchmark_symbols=benchmark_symbols,
         )
+        if metrics["result_quality_status"] == "invalid":
+            invalid_count = (
+                metrics["degraded_decision_count"]
+                + metrics["failed_decision_count"]
+            )
+            warnings.append(
+                "BACKTEST_RESULT_INVALID: "
+                f"{invalid_count} of {metrics['decision_count']} decisions "
+                "were degraded or failed; performance metrics include "
+                "fallback behavior and must not be interpreted as a valid "
+                "evaluation of the complete strategy"
+            )
+        elif metrics["result_quality_status"] == "not_evaluated":
+            warnings.append(
+                "BACKTEST_RESULT_NOT_EVALUATED: no decision was generated "
+                "during the requested period"
+            )
         if not trades:
             warnings.append(
                 "No trades were executed; inspect decision and data-quality warnings"

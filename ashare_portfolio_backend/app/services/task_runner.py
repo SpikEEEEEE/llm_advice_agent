@@ -132,6 +132,9 @@ class DecisionTaskRunner:
                 "LLM_MAX_TOKENS": str(self.settings.llm_max_tokens),
                 "LLM_TIMEOUT_SECONDS": str(self.settings.llm_timeout_seconds),
                 "LLM_MAX_RETRIES": str(self.settings.llm_max_retries),
+                "LLM_STRUCTURED_OUTPUT_MODE": (
+                    self.settings.llm_structured_output_mode
+                ),
                 "DECISION_ENGINE": self.settings.decision_engine_mode,
                 "MULTI_AGENT_SHORTLIST_SIZE": str(
                     self.settings.multi_agent_shortlist_size
@@ -142,8 +145,17 @@ class DecisionTaskRunner:
                 "MULTI_AGENT_MAX_CALLS": str(
                     self.settings.multi_agent_max_calls
                 ),
+                "MULTI_AGENT_OUTPUT_RETRIES": str(
+                    self.settings.multi_agent_output_retries
+                ),
                 "MULTI_AGENT_SEMANTIC_RETRIES": str(
                     self.settings.multi_agent_semantic_retries
+                ),
+                "MULTI_AGENT_MIN_ANALYSTS": str(
+                    self.settings.multi_agent_min_analysts
+                ),
+                "MULTI_AGENT_MIN_RISK_REVIEWS": str(
+                    self.settings.multi_agent_min_risk_reviews
                 ),
                 "MULTI_AGENT_TECHNICAL_WEIGHT": str(
                     self.settings.multi_agent_technical_weight

@@ -26,13 +26,16 @@ Tushare 数据，调用 OpenAI-compatible LLM 生成目标仓位，再经过确�
 - 交易日、行情、复权因子、估值、财务指标和公司相关新闻；
 - 本地计算收益率、均线、波动率、RSI、成交量比例和 52 周位置；
 - OpenAI-compatible Chat Completions；
-- 优先使用 strict JSON Schema，不支持时显式降级到严格 `json_object`；
+- 可按供应商能力选择 strict JSON Schema 或严格 `json_object`，DeepSeek
+  在 `auto` 模式下直接使用 `json_object`，不会为每个 Agent 先做一次失败探测；
 - 可选的股票池原生多 Agent 决策图：全池横向研究、多空辩论、组合构建、三路风险审查；
 - 多 Agent 不按股票循环调用，而是共享同一个股票池状态并最终只输出一个组合权重向量；
 - 模型输出必须覆盖所有有效股票，并通过严格字段、数值和 action/target 语义校验；
 - A 股买入 100 股整手、T+1 可卖数量、现金、最低现金比例、单股仓位和最大持仓数限制；
 - 缺价时强制 `hold`，持仓估值不完整时冻结全部新买入；
 - 数据质量异常时禁止新增或加仓，但仍允许确定性风控后的减仓；
+- 单只股票特征构建失败时只隔离该股票并把整次组合决策降级为 reduce-only，不会让
+  一只畸形快照击穿完整股票池任务；
 - 原始模型结论、风控调整和最终结论分别保存，便于审计；
 - 可选 `X-API-Key` 认证、健康检查和 OpenAPI 文档。
 
@@ -82,6 +85,7 @@ TUSHARE_TOKEN=your-token
 OPENAI_API_KEY=your-key
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4o-mini
+LLM_STRUCTURED_OUTPUT_MODE=auto
 ```
 
 也可以用 `LLM_API_KEY` 替代 `OPENAI_API_KEY`，并将 `LLM_BASE_URL` 指向兼容
@@ -94,13 +98,38 @@ DECISION_ENGINE=portfolio_multi_agent
 MULTI_AGENT_SHORTLIST_SIZE=8
 MULTI_AGENT_PARALLELISM=3
 MULTI_AGENT_MAX_CALLS=32
+MULTI_AGENT_OUTPUT_RETRIES=1
 MULTI_AGENT_SEMANTIC_RETRIES=1
+MULTI_AGENT_MIN_ANALYSTS=2
+MULTI_AGENT_MIN_RISK_REVIEWS=2
 ```
 
 `MULTI_AGENT_SHORTLIST_SIZE` 只限制进入深度辩论的非持仓候选；已有持仓一定进入
 shortlist，因此不会因为预筛选而失去减仓或清仓判断。三个分析权重可以通过
 `MULTI_AGENT_TECHNICAL_WEIGHT`、`MULTI_AGENT_FUNDAMENTAL_WEIGHT` 和
 `MULTI_AGENT_NEWS_WEIGHT` 调整。
+
+`LLM_STRUCTURED_OUTPUT_MODE` 可设为：
+
+- `auto`：`api.deepseek.com` 直接使用 `json_object`，其他地址先使用
+  `json_schema`，只有供应商明确不支持时才降级；
+- `json_object`：适用于 DeepSeek 等支持 JSON Mode、但不实现 strict JSON
+  Schema 的 OpenAI-compatible 服务；
+- `json_schema`：只使用 strict JSON Schema，不进行格式能力降级。
+
+例如使用 DeepSeek 时可配置：
+
+```dotenv
+LLM_BASE_URL=https://api.deepseek.com
+LLM_API_KEY=your-deepseek-key
+LLM_MODEL=your-enabled-deepseek-model
+LLM_STRUCTURED_OUTPUT_MODE=json_object
+```
+
+`MULTI_AGENT_OUTPUT_RETRIES` 用于 JSON 解码或 Pydantic 字段校验失败后的定向修复；
+`MULTI_AGENT_SEMANTIC_RETRIES` 用于股票覆盖、priority 等跨字段语义校验失败后的
+修复。修复请求会携带有限长度的原始输出、具体字段路径和校验错误，而不是只重复
+原 Prompt。两类重试都计入 `MULTI_AGENT_MAX_CALLS`。
 
 ## 股票池多 Agent 决策图
 
@@ -130,17 +159,38 @@ shortlist，因此不会因为预筛选而失去减仓或清仓判断。三个�
                        现有 A 股确定性风控
 ```
 
-三个 Analyst 每次都看到完整有效股票池并做横向比较；后续角色共享前序结构化产物，
-而不是让每只股票各自形成互不知情的结论。Portfolio Manager 的输出必须覆盖全部
-shortlist，股票权重与现金权重之和必须为 100%，并满足最低现金、单股上限和最大
-持仓数。语义校验失败时会携带校验错误进行有限次数修复；总模型请求数还受
-`MULTI_AGENT_MAX_CALLS` 硬限制。
+三个 Analyst 每次都看到完整有效股票池并做横向比较；全池阶段每只股票只返回紧凑
+的分数、置信度、方向、短结论和标准化风险标签，详细辩论只针对 shortlist，避免
+20 股输出因自然语言过长而被截断。后续角色共享前序结构化产物，而不是让每只股票
+各自形成互不知情的结论。
+
+分析阶段不会把失败 Agent 的权重重新归一化给剩余 Agent，而是保留原始权重并输出
+`analysis_coverage`：
+
+- 股票池行情或持仓估值不完整时，准备阶段直接标记为 `degraded`，整个组合只能
+  减仓或保持；
+- 3/3 Analyst 成功时为 `healthy`，允许在后续风控约束内新增风险；
+- 达到 `MULTI_AGENT_MIN_ANALYSTS`、但不足 3 个时为 `degraded`，整个组合只能
+  减仓或保持，不能新开仓或加仓；
+- 未达到 Analyst 法定人数时为 `failed`，决策失败并进入安全持有；
+- 风险审查未达到 `MULTI_AGENT_MIN_RISK_REVIEWS` 时，即使研究完成也只能使用
+  确定性的 reduce-only 安全组合。
+
+Trader 和 Portfolio Manager 提供相对偏好与目标意图；最终精确权重由确定性分配器
+执行归一化、最低现金、单股上限、最大持仓数和 reduce-only 约束。LLM 不再独自承担
+“股票权重加现金必须等于 100%”的算术正确性。`AShareRiskPolicy` 还会在生成最终
+股数时再次读取 `decision_quality`：只要是 `degraded`、`failed` 或非法质量标记，
+即使上游错误地产生了加仓目标，也会在最后一道风控中被强制压回当前持仓。
 
 正常路径基础调用数为 11 次：3 个 Analyst、Bull、Bear、Research Manager、
 Portfolio Trader、3 个 Risk Reviewer 和 Portfolio Manager。最终结果的
 `llm_meta.agent_artifacts` 会保留各阶段结构化结论，`agent_trace` 会保留调用和
-token usage，便于审计。它们是当前任务内的显式状态，不会自动读取上一次交易任务；
-跨任务记忆仍需另行设计绩效反馈或交易日志输入。
+token usage，便于审计。格式修复、语义修复和网络重试会增加供应商尝试次数，因此
+应同时查看 `provider_attempts`、`validated_outputs` 和
+`output_repair_attempts`；`configured_response_format` 与
+`resolved_response_format` 会分别记录配置模式和本次实际采用的格式。它们是当前
+任务内的显式状态，不会自动读取上一次交易任务；跨任务记忆仍需另行设计绩效反馈
+或交易日志输入。
 
 ## 历史回测
 
@@ -174,8 +224,13 @@ PYTHONPATH=ashare_portfolio_backend \
 - 卖出印花税在 2023-08-28 前按 0.1%、此后按 0.05%模拟；
 - 默认不使用同一开盘卖出所得继续买入，与在线确定性风控的保守现金语义一致；
 - 使用复权因子构造以回测起点归一化的总回报价格，避免分红除权造成虚假亏损；
-- 相同模型、数据、组合和配置的历史决策会保存到
-  `data/cache/backtest_decisions/`，重复运行不会再次消耗 LLM 调用。
+- 只有 `decision_quality=healthy` 的历史决策会保存到
+  `data/cache/backtest_decisions/`；`degraded`、`failed` 或安全持有不会写入
+  长期缓存；空决策和非法质量标记同样不可缓存，避免把不完整研究反复当作正常策略
+  结果；
+- 缓存 key 包含图、Prompt、输出 Schema、质量策略的显式版本，以及结构化输出模式、
+  重试次数、Analyst/Risk 法定人数、运行模式和组合约束。上述逻辑或配置变化会使
+  旧决策自动失效；旧格式缓存也会被拒绝读取；
 - 默认最多允许 24 个决策时点；更长或更高频的回测必须显式提高
   `--max-decisions`，防止意外产生大量模型费用。
 
@@ -187,11 +242,22 @@ PYTHONPATH=ashare_portfolio_backend \
 默认结果目录为 `data/backtests/<run_id>/`：
 
 ```text
-summary.json       # 收益、年化波动、Sharpe、最大回撤、换手和费用
+summary.json       # 收益、风险、费用、调用审计和回测结果质量
 equity_curve.csv   # 每个交易日的净值、现金和持仓市值
 trades.csv         # 决策日、成交日、成交价、股数、滑点和费用
-decisions.json     # 每次原始 Agent 元数据、风控结果和数据告警
+decisions.json     # 每次质量、覆盖率、阶段健康度、原始 Agent 元数据和风控结果
 ```
+
+`summary.json` 中的 `result_quality_status` 只有在全部决策均为 `healthy` 时才是
+`valid`。只要出现一次 `degraded` 或 `failed`，状态就是 `invalid`，并产生
+`BACKTEST_RESULT_INVALID` 强告警；这时收益率包含降级或安全持有行为，不能解释为
+完整多 Agent 策略的有效表现。调用统计会区分：
+
+- `llm_provider_attempts`：本次实际发出的供应商尝试；
+- `llm_cached_original_provider_attempts`：缓存决策最初生成时的供应商尝试；
+- `llm_validated_outputs` 与 `llm_output_repair_attempts`：本次成功结构化节点数和
+  输出修复次数；
+- `healthy/degraded/failed_decision_count`：三类决策数量与对应比例。
 
 完整 20 股股票池做一年月频多 Agent 回测，正常路径大约产生 12 次决策、
 132 次模型调用；建议先用 2–3 只股票和 2–3 个月验证凭据、Tushare 权限和成本。

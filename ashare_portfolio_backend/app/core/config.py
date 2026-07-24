@@ -62,10 +62,14 @@ class Settings:
     market_close_hour: int
     market_close_minute: int
     decision_engine_mode: str = "single_llm"
+    llm_structured_output_mode: str = "auto"
     multi_agent_shortlist_size: int = 8
     multi_agent_parallelism: int = 3
     multi_agent_max_calls: int = 32
+    multi_agent_output_retries: int = 1
     multi_agent_semantic_retries: int = 1
+    multi_agent_min_analysts: int = 2
+    multi_agent_min_risk_reviews: int = 2
     multi_agent_technical_weight: float = 0.35
     multi_agent_fundamental_weight: float = 0.40
     multi_agent_news_weight: float = 0.25
@@ -122,14 +126,31 @@ class Settings:
             raise ValueError(
                 "DECISION_ENGINE must be 'single_llm' or 'portfolio_multi_agent'"
             )
+        if self.llm_structured_output_mode not in {
+            "auto",
+            "json_schema",
+            "json_object",
+        }:
+            raise ValueError(
+                "LLM_STRUCTURED_OUTPUT_MODE must be 'auto', "
+                "'json_schema', or 'json_object'"
+            )
         if self.multi_agent_shortlist_size < 1:
             raise ValueError("MULTI_AGENT_SHORTLIST_SIZE must be at least 1")
         if not 1 <= self.multi_agent_parallelism <= 8:
             raise ValueError("MULTI_AGENT_PARALLELISM must be between 1 and 8")
         if self.multi_agent_max_calls < 1:
             raise ValueError("MULTI_AGENT_MAX_CALLS must be at least 1")
+        if not 0 <= self.multi_agent_output_retries <= 5:
+            raise ValueError("MULTI_AGENT_OUTPUT_RETRIES must be between 0 and 5")
         if self.multi_agent_semantic_retries < 0:
             raise ValueError("MULTI_AGENT_SEMANTIC_RETRIES cannot be negative")
+        if not 2 <= self.multi_agent_min_analysts <= 3:
+            raise ValueError("MULTI_AGENT_MIN_ANALYSTS must be between 2 and 3")
+        if not 2 <= self.multi_agent_min_risk_reviews <= 3:
+            raise ValueError(
+                "MULTI_AGENT_MIN_RISK_REVIEWS must be between 2 and 3"
+            )
         analyst_weights = (
             self.multi_agent_technical_weight,
             self.multi_agent_fundamental_weight,
@@ -234,13 +255,27 @@ class Settings:
             decision_engine_mode=env("DECISION_ENGINE", "single_llm")
             .strip()
             .lower(),
+            llm_structured_output_mode=env(
+                "LLM_STRUCTURED_OUTPUT_MODE", "auto"
+            )
+            .strip()
+            .lower(),
             multi_agent_shortlist_size=int(
                 env("MULTI_AGENT_SHORTLIST_SIZE", "8")
             ),
             multi_agent_parallelism=int(env("MULTI_AGENT_PARALLELISM", "3")),
             multi_agent_max_calls=int(env("MULTI_AGENT_MAX_CALLS", "32")),
+            multi_agent_output_retries=int(
+                env("MULTI_AGENT_OUTPUT_RETRIES", "1")
+            ),
             multi_agent_semantic_retries=int(
                 env("MULTI_AGENT_SEMANTIC_RETRIES", "1")
+            ),
+            multi_agent_min_analysts=int(
+                env("MULTI_AGENT_MIN_ANALYSTS", "2")
+            ),
+            multi_agent_min_risk_reviews=int(
+                env("MULTI_AGENT_MIN_RISK_REVIEWS", "2")
             ),
             multi_agent_technical_weight=float(
                 env("MULTI_AGENT_TECHNICAL_WEIGHT", "0.35")

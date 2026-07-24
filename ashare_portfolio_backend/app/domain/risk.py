@@ -47,6 +47,31 @@ class AShareRiskPolicy:
         positions = decision_input.portfolio.position_map()
         market = decision_input.market
         warnings = list(bundle.warnings)
+        raw_decision_quality = (
+            bundle.meta.get("decision_quality")
+            if isinstance(bundle.meta, dict)
+            else None
+        )
+        if raw_decision_quality is None:
+            # Legacy/single-agent engines predate the quality marker. Preserve
+            # their existing behavior unless they explicitly provide a marker.
+            decision_quality = "healthy"
+        else:
+            candidate_quality = str(raw_decision_quality).strip().lower()
+            if candidate_quality in {"healthy", "degraded", "failed"}:
+                decision_quality = candidate_quality
+            else:
+                # An explicit but unrecognized marker is malformed safety
+                # metadata, so fail closed instead of allowing new exposure.
+                decision_quality = "failed"
+                warnings.append(
+                    "Invalid decision_quality metadata was treated as failed"
+                )
+        quality_reduce_only = decision_quality in {"degraded", "failed"}
+        if quality_reduce_only:
+            warnings.append(
+                f"Decision quality {decision_quality} enforces reduce-only risk controls"
+            )
         raw_increase_blocks = (
             bundle.meta.get("increase_blocked_symbols", {})
             if isinstance(bundle.meta, dict)
@@ -57,7 +82,16 @@ class AShareRiskPolicy:
             if isinstance(raw_increase_blocks, dict)
             else {}
         )
+        valid_prices: dict[str, Decimal] = {}
         for symbol, snapshot in market.items():
+            price = _decimal(snapshot.reference_price)
+            if price > 0:
+                valid_prices[symbol] = price
+            else:
+                increase_blocked_symbols.setdefault(
+                    symbol,
+                    "INVALID_REFERENCE_PRICE",
+                )
             if snapshot.data_quality_warnings:
                 increase_blocked_symbols.setdefault(
                     symbol,
@@ -67,14 +101,14 @@ class AShareRiskPolicy:
         unpriced_held_symbols = sorted(
             symbol
             for symbol, position in positions.items()
-            if position.shares > 0 and symbol not in market
+            if position.shares > 0 and symbol not in valid_prices
         )
         valuation_complete = not unpriced_held_symbols
 
         known_position_value = sum(
-            Decimal(position.shares) * market[symbol].reference_price
+            Decimal(position.shares) * valid_prices[symbol]
             for symbol, position in positions.items()
-            if symbol in market
+            if symbol in valid_prices
         )
         total_assets = decision_input.portfolio.cash + known_position_value
         reserve_cash = total_assets * self.settings.min_cash_ratio
@@ -83,6 +117,10 @@ class AShareRiskPolicy:
             if valuation_complete
             else Decimal("0")
         )
+        if quality_reduce_only:
+            # This is an independent cash-level guard in addition to the
+            # per-symbol target clamp below.
+            spendable_cash = Decimal("0")
         max_position_value = total_assets * self.settings.max_position_ratio
 
         if not valuation_complete:
@@ -100,9 +138,14 @@ class AShareRiskPolicy:
             adjustments: list[dict[str, Any]] = []
             flags: list[str] = []
 
-            if snapshot is None:
+            if snapshot is None or symbol not in valid_prices:
+                default_reason = (
+                    "Market data was unavailable"
+                    if snapshot is None
+                    else "Reference price was invalid"
+                )
                 reason = decision_input.unavailable_symbols.get(
-                    symbol, "Market data was unavailable"
+                    symbol, default_reason
                 )
                 plans[symbol] = {
                     "symbol": symbol,
@@ -129,7 +172,7 @@ class AShareRiskPolicy:
                 }
                 continue
 
-            price = snapshot.reference_price
+            price = valid_prices[symbol]
             current_value = Decimal(current_shares) * price
             raw_action = str(raw.get("action") or "hold").strip().lower()
             if not raw:
@@ -150,6 +193,9 @@ class AShareRiskPolicy:
                 )
                 raw_action = "hold"
 
+            quality_increase_requested = (
+                quality_reduce_only and raw_action == "increase"
+            )
             increase_block_reason = increase_blocked_symbols.get(symbol)
             if raw_action == "increase":
                 if increase_block_reason:
@@ -237,11 +283,30 @@ class AShareRiskPolicy:
             else:
                 target_shares = current_shares
 
+            if quality_reduce_only and (
+                quality_increase_requested or target_shares > current_shares
+            ):
+                adjustments.append(
+                    {
+                        "rule": "DECISION_QUALITY_REDUCE_ONLY",
+                        "decision_quality": decision_quality,
+                        "before": target_shares,
+                        "after": current_shares,
+                    }
+                )
+                flags.append("INCREASE_BLOCKED_BY_DECISION_QUALITY")
+                target_shares = min(target_shares, current_shares)
+
             reasons = raw.get("reasons") if isinstance(raw.get("reasons"), list) else []
             if increase_block_reason:
                 reasons = [
                     *reasons,
                     f"Risk control: {increase_block_reason}",
+                ]
+            if quality_increase_requested:
+                reasons = [
+                    *reasons,
+                    f"Risk control: decision quality {decision_quality} is reduce-only",
                 ]
             plans[symbol] = {
                 "symbol": symbol,
@@ -361,6 +426,7 @@ class AShareRiskPolicy:
             "universe_version": decision_input.universe_version,
             "provider": "tushare",
             "model": self.settings.llm_model,
+            "decision_quality": decision_quality,
             "portfolio_summary": {
                 "cash": float(decision_input.portfolio.cash),
                 "known_total_assets": float(total_assets),

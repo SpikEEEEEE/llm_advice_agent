@@ -20,6 +20,25 @@ from app.repositories.sqlite import SQLiteRepository
 
 
 logger = logging.getLogger(__name__)
+SAFE_EXCEPTION_TYPES = {
+    "RuntimeError",
+    "ValueError",
+    "TypeError",
+    "KeyError",
+    "TimeoutError",
+    "ConnectionError",
+    "DataUnavailableError",
+    "StaleDataError",
+    "ProviderConfigurationError",
+    "PortfolioAgentGraphError",
+    "PortfolioAgentOutputError",
+    "DecisionOutputError",
+}
+
+
+def _safe_exception_type(exc: Exception) -> str:
+    name = type(exc).__name__
+    return name if name in SAFE_EXCEPTION_TYPES else "Exception"
 
 
 class DecisionService:
@@ -103,8 +122,15 @@ class DecisionService:
                         for warning in snapshot.data_quality_warnings
                     )
                 except Exception as exc:
-                    unavailable[symbol] = str(exc)
-                    logger.warning("Market data unavailable for %s: %s", symbol, exc)
+                    failure_type = _safe_exception_type(exc)
+                    unavailable[symbol] = (
+                        f"{failure_type}: market data unavailable"
+                    )
+                    logger.warning(
+                        "Market data unavailable for %s (%s)",
+                        symbol,
+                        failure_type,
+                    )
 
             decision_input = DecisionInput(
                 run_id=run_id,
@@ -127,10 +153,31 @@ class DecisionService:
                     ),
                 )
             except Exception as exc:
-                logger.exception("LLM decision failed for %s", run_id)
+                failure_type = _safe_exception_type(exc)
+                logger.error(
+                    "LLM decision failed for %s (%s)",
+                    run_id,
+                    failure_type,
+                )
                 bundle = RawDecisionBundle(
                     decisions={},
-                    warnings=(f"LLM decision failed; safe-hold fallback applied: {exc}",),
+                    meta={
+                        "calls": 0,
+                        "provider_attempts": 0,
+                        "engine": "failed_safe_hold",
+                        "decision_quality": "failed",
+                        "analysis_coverage": 0.0,
+                        "stage_health": {
+                            "decision_engine": {
+                                "status": "failed",
+                                "failure_category": failure_type,
+                            }
+                        },
+                    },
+                    warnings=(
+                        "LLM decision failed; safe-hold fallback applied "
+                        f"({failure_type})",
+                    ),
                 )
 
             safe_decisions = sanitize_json_value(bundle.decisions)
@@ -150,16 +197,27 @@ class DecisionService:
 
             self.repository.update_run_status(run_id, "validating")
             result = self.risk_policy.apply(decision_input, bundle)
-            result["market_snapshot"] = {
-                symbol: {
+            market_snapshot: dict[str, dict[str, Any]] = {}
+            for symbol, snapshot in market.items():
+                try:
+                    close_series = snapshot.bars.get("close")
+                    recent_closes = (
+                        [
+                            float(value)
+                            for value in close_series.tail(7).tolist()
+                        ]
+                        if close_series is not None
+                        else []
+                    )
+                except Exception:
+                    recent_closes = []
+                market_snapshot[symbol] = {
                     "data_date": snapshot.data_date.isoformat(),
                     "reference_price": float(snapshot.reference_price),
                     "retrieved_at": snapshot.retrieved_at.isoformat()
                     if snapshot.retrieved_at
                     else None,
-                    "recent_closes": [
-                        float(value) for value in snapshot.bars["close"].tail(7).tolist()
-                    ],
+                    "recent_closes": recent_closes,
                     "news": [
                         {
                             "id": item.get("id"),
@@ -173,9 +231,12 @@ class DecisionService:
                     "fundamentals": snapshot.fundamentals,
                     "data_quality_warnings": list(snapshot.data_quality_warnings),
                 }
-                for symbol, snapshot in market.items()
-            }
-            degraded = bool(unavailable or result.get("warnings"))
+            result["market_snapshot"] = market_snapshot
+            degraded = bool(
+                unavailable
+                or result.get("warnings")
+                or result.get("decision_quality") != "healthy"
+            )
             if market and int(bundle.meta.get("calls", 0) or 0) == 0:
                 degraded = True
                 result.setdefault("warnings", []).append(
@@ -183,9 +244,14 @@ class DecisionService:
                 )
             self.repository.complete_decision_run(run_id, result, degraded=degraded)
         except Exception as exc:
-            logger.exception("Decision run %s failed", run_id)
+            failure_type = _safe_exception_type(exc)
+            logger.error(
+                "Decision run %s failed (%s)",
+                run_id,
+                failure_type,
+            )
             self.repository.fail_decision_run(
                 run_id,
-                code=type(exc).__name__.upper(),
-                message=str(exc),
+                code=failure_type.upper(),
+                message=f"Decision run failed safely ({failure_type})",
             )

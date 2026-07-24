@@ -340,7 +340,13 @@ class OpenAIDecisionEngine:
         if not expected_symbols:
             return RawDecisionBundle(
                 decisions={},
-                meta={"calls": 0, "model": self.settings.llm_model},
+                meta={
+                    "engine": "failed_safe_hold",
+                    "calls": 0,
+                    "model": self.settings.llm_model,
+                    "decision_quality": "failed",
+                    "analysis_coverage": 0.0,
+                },
                 warnings=("No valid market context was available for the LLM",),
             )
         if on_stage:
@@ -365,8 +371,11 @@ class OpenAIDecisionEngine:
         return RawDecisionBundle(
             decisions=decisions,
             meta={
+                "engine": "single_llm",
                 "calls": calls,
                 "model": self.settings.llm_model,
+                "decision_quality": "healthy",
+                "analysis_coverage": 1.0,
                 "response_format": format_name,
                 "response_id": _response_value(response, "id"),
                 "usage": usage,
