@@ -414,7 +414,8 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider
 
 
 
-PYTHONPATH=ashare_portfolio_backend \
+$env:PYTHONPATH="$PWD\ashare_portfolio_backend"
+
 python -m app.backtest.cli \
   --start 2025-01-01 \
   --end 2025-03-31 \
@@ -424,12 +425,19 @@ python -m app.backtest.cli \
   --initial-cash 1000000 \
   --symbols 600519.SH,300750.SZ,601318.SH
 
-export PYTHONPATH="$PWD/ashare_portfolio_backend"
 
-python -m app.backtest.cli \
-  --start 2026-01-01 \
-  --end 2026-07-01 \
-  --engine portfolio_multi_agent \
-  --rebalance monthly \
-  --max-decisions 24 \
+python -m app.backtest.cli `
+  --project-root . `
+  --start 2023-01-01 `
+  --end 2023-12-30 `
+  --engine portfolio_multi_agent `
+  --rebalance weekly `
+  --max-decisions 200 `
   --initial-cash 1000000
+
+
+$env:PYTHONPATH = (Resolve-Path .\ashare_portfolio_backend).Path
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+
+python -m streamlit run ashare_portfolio_frontend\app.py

@@ -257,6 +257,37 @@ class SQLiteRepository:
             ).fetchone()
         return self._run_row(row) if row else None
 
+    def list_decision_runs(
+        self,
+        *,
+        portfolio_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 100))
+        with self._connect() as connection:
+            if portfolio_id is None:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                      FROM decision_runs
+                     ORDER BY created_at DESC
+                     LIMIT ?
+                    """,
+                    (bounded_limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                      FROM decision_runs
+                     WHERE portfolio_id = ?
+                     ORDER BY created_at DESC
+                     LIMIT ?
+                    """,
+                    (portfolio_id, bounded_limit),
+                ).fetchall()
+        return [self._run_row(row) for row in rows]
+
     def update_run_status(self, run_id: str, status: str) -> None:
         with self._write_lock, self._connect() as connection:
             if status == "fetching_data":

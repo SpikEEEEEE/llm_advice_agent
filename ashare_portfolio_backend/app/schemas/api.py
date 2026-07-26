@@ -9,6 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.core.config import SYMBOL_PATTERN
 
 
+def _normalize_symbol(value: str) -> str:
+    symbol = value.strip().upper()
+    if not SYMBOL_PATTERN.fullmatch(symbol):
+        raise ValueError("symbol must look like 600519.SH, 000001.SZ, or 430047.BJ")
+    return symbol
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -25,10 +32,7 @@ class PositionPayload(StrictModel):
     @field_validator("symbol")
     @classmethod
     def normalize_symbol(cls, value: str) -> str:
-        symbol = value.strip().upper()
-        if not SYMBOL_PATTERN.fullmatch(symbol):
-            raise ValueError("symbol must look like 600519.SH, 000001.SZ, or 430047.BJ")
-        return symbol
+        return _normalize_symbol(value)
 
     @model_validator(mode="after")
     def validate_available_shares(self) -> "PositionPayload":
@@ -66,6 +70,25 @@ class DecisionRunCreateRequest(StrictModel):
     portfolio_id: str = Field(min_length=1, max_length=64)
     mode: Literal["holdings_only", "rebalance"] = "rebalance"
     as_of: datetime | None = None
+    universe: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "Optional point-in-time universe for this run. When omitted, the "
+            "server-configured universe is used."
+        ),
+    )
+
+    @field_validator("universe")
+    @classmethod
+    def normalize_universe(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        symbols = [_normalize_symbol(symbol) for symbol in value]
+        if len(symbols) != len(set(symbols)):
+            raise ValueError("universe contains duplicate symbols")
+        return symbols
 
 
 class DecisionRunResponse(StrictModel):
@@ -85,6 +108,7 @@ class DecisionRunResponse(StrictModel):
     mode: Literal["holdings_only", "rebalance"]
     as_of: datetime
     universe_version: str
+    universe: list[str]
     result: dict[str, Any] | None = None
     error_code: str | None = None
     error_message: str | None = None

@@ -57,6 +57,7 @@ def test_portfolio_and_decision_run_api(tmp_path):
         assert run_response.status_code == 202
         body = run_response.json()
         assert body["status"] == "completed"
+        assert body["universe"] == ["600519.SH", "300750.SZ"]
 
         duplicate = client.post(
             "/api/v1/decision-runs",
@@ -114,3 +115,92 @@ def test_portfolio_and_decision_run_api(tmp_path):
         )
         assert duplicate_failed.status_code == 202
         assert duplicate_failed.json()["id"] == failed_run_id
+
+
+def test_decision_run_accepts_and_lists_a_custom_universe(tmp_path):
+    settings = make_settings(tmp_path)
+    repository = SQLiteRepository(settings.database_path)
+    market = FakeMarketData()
+    engine = FakeDecisionEngine()
+    risk = AShareRiskPolicy(settings)
+    service = DecisionService(repository, market, engine, risk)
+    runner = DecisionTaskRunner(service, mode="inline", max_workers=1)
+    container = AppContainer(
+        settings=settings,
+        repository=repository,
+        market_data=market,  # type: ignore[arg-type]
+        decision_engine=engine,  # type: ignore[arg-type]
+        risk_policy=risk,
+        decision_service=service,
+        task_runner=runner,
+    )
+
+    with TestClient(create_app(container)) as client:
+        portfolio = client.post(
+            "/api/v1/portfolios",
+            json={"name": "Custom pool", "cash": "50000", "positions": []},
+        ).json()
+        response = client.post(
+            "/api/v1/decision-runs",
+            json={
+                "portfolio_id": portfolio["id"],
+                "mode": "rebalance",
+                "universe": ["000001.sz", "600519.sh"],
+            },
+        )
+
+        assert response.status_code == 202
+        run = response.json()
+        assert run["universe"] == ["000001.SZ", "600519.SH"]
+        assert run["universe_version"].startswith("custom-")
+        assert [item["symbol"] for item in run["result"]["decisions"]] == [
+            "000001.SZ",
+            "600519.SH",
+        ]
+
+        history = client.get("/api/v1/decision-runs?limit=10")
+        assert history.status_code == 200
+        assert [item["id"] for item in history.json()] == [run["id"]]
+        assert history.json()[0]["universe"] == run["universe"]
+
+
+def test_custom_universe_rejects_duplicates_and_invalid_symbols(tmp_path):
+    settings = make_settings(tmp_path)
+    repository = SQLiteRepository(settings.database_path)
+    market = FakeMarketData()
+    engine = FakeDecisionEngine()
+    risk = AShareRiskPolicy(settings)
+    service = DecisionService(repository, market, engine, risk)
+    runner = DecisionTaskRunner(service, mode="inline", max_workers=1)
+    container = AppContainer(
+        settings=settings,
+        repository=repository,
+        market_data=market,  # type: ignore[arg-type]
+        decision_engine=engine,  # type: ignore[arg-type]
+        risk_policy=risk,
+        decision_service=service,
+        task_runner=runner,
+    )
+
+    with TestClient(create_app(container)) as client:
+        portfolio = client.post(
+            "/api/v1/portfolios",
+            json={"name": "Validation", "cash": "50000", "positions": []},
+        ).json()
+        duplicate = client.post(
+            "/api/v1/decision-runs",
+            json={
+                "portfolio_id": portfolio["id"],
+                "universe": ["600519.SH", "600519.sh"],
+            },
+        )
+        invalid = client.post(
+            "/api/v1/decision-runs",
+            json={
+                "portfolio_id": portfolio["id"],
+                "universe": ["NOT-A-SYMBOL"],
+            },
+        )
+
+        assert duplicate.status_code == 422
+        assert invalid.status_code == 422

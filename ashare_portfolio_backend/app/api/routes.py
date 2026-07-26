@@ -6,7 +6,16 @@ from datetime import datetime, timedelta
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import JSONResponse
 
 from app.api.dependencies import get_container, require_api_key
@@ -40,6 +49,7 @@ def _run_response(payload: dict[str, Any]) -> DecisionRunResponse:
                 "mode",
                 "as_of",
                 "universe_version",
+                "universe",
                 "result",
                 "error_code",
                 "error_message",
@@ -162,7 +172,14 @@ def create_decision_run(
     portfolio = container.repository.get_portfolio(request.portfolio_id)
     if portfolio is None:
         raise HTTPException(status_code=404, detail="Portfolio not found")
-    version, universe = container.settings.load_universe()
+    if request.universe is None:
+        version, universe = container.settings.load_universe()
+    else:
+        universe = request.universe
+        universe_digest = hashlib.sha256(
+            ",".join(universe).encode("utf-8")
+        ).hexdigest()[:12]
+        version = f"custom-{universe_digest}"
     timezone = ZoneInfo("Asia/Shanghai")
     as_of = request.as_of or datetime.now(timezone)
     if as_of.tzinfo is None:
@@ -226,6 +243,21 @@ def create_decision_run(
             ) from exc
         run = container.repository.get_decision_run(run["id"]) or run
     return _run_response(run)
+
+
+@protected.get("/decision-runs", response_model=list[DecisionRunResponse])
+def list_decision_runs(
+    container: Container,
+    portfolio_id: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[DecisionRunResponse]:
+    return [
+        _run_response(run)
+        for run in container.repository.list_decision_runs(
+            portfolio_id=portfolio_id,
+            limit=limit,
+        )
+    ]
 
 
 @protected.get("/decision-runs/{run_id}", response_model=DecisionRunResponse)
