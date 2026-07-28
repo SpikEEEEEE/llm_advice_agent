@@ -6,6 +6,7 @@ python-dotenv>=1.0.0,<2.0.0
 PyYAML>=6.0,<7.0
 tushare>=1.4.21,<2.0.0
 openai>=1.64.0,<3.0.0
+langgraph>=1.0.0,<2.0.0
 
 # Test dependencies
 pytest>=7.0,<9.0

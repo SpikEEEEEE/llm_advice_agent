@@ -414,7 +414,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider
 
 
 
-$env:PYTHONPATH="$PWD\ashare_portfolio_backend"
+export PYTHONPATH="$PWD/ashare_portfolio_backend"
 
 python -m app.backtest.cli \
   --start 2025-01-01 \
